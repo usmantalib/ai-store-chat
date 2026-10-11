@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name:       AI Store Chat
- * Description:       A lightweight AI chat widget for WooCommerce that answers customer questions from your own policy pages and products, using the Claude API. No monthly SaaS fee — you pay only for the messages customers send.
- * Version:           1.0.0
+ * Description:       A lightweight AI chat widget for WooCommerce that answers customer questions from your own policy pages and products, using the Claude or Gemini API. No monthly SaaS fee — you pay only for the messages customers send.
+ * Version:           1.1.0
  * Author:            The AI Dev Desk
  * Requires at least: 6.0
  * Requires PHP:      7.4
@@ -21,6 +21,7 @@ final class AI_Store_Chat {
 	const CONTEXT_CACHE = 'aisc_context_cache';
 	const API_URL       = 'https://api.anthropic.com/v1/messages';
 	const API_VERSION   = '2023-06-01';
+	const GEMINI_URL    = 'https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent';
 
 	/** Max characters accepted for one customer message. */
 	const MAX_MESSAGE_CHARS = 500;
@@ -44,8 +45,11 @@ final class AI_Store_Chat {
 
 	public static function defaults() {
 		return array(
+			'provider'         => 'claude',
 			'api_key'          => '',
 			'model'            => 'claude-haiku-5-5',
+			'gemini_api_key'   => '',
+			'gemini_model'     => 'gemini-3.5-flash-lite',
 			'page_ids'         => array(),
 			'include_products' => 1,
 			'product_limit'    => 200,
@@ -77,11 +81,16 @@ final class AI_Store_Chat {
 		$old = self::settings();
 		$out = self::defaults();
 
-		// An empty key field means "keep the saved key" so it never has to be re-shown.
-		$key            = isset( $input['api_key'] ) ? trim( sanitize_text_field( $input['api_key'] ) ) : '';
-		$out['api_key'] = '' !== $key ? $key : $old['api_key'];
+		$out['provider'] = ( isset( $input['provider'] ) && 'gemini' === $input['provider'] ) ? 'gemini' : 'claude';
 
-		$out['model']            = isset( $input['model'] ) ? sanitize_text_field( $input['model'] ) : $out['model'];
+		// An empty key field means "keep the saved key" so it never has to be re-shown.
+		foreach ( array( 'api_key', 'gemini_api_key' ) as $field ) {
+			$key           = isset( $input[ $field ] ) ? trim( sanitize_text_field( $input[ $field ] ) ) : '';
+			$out[ $field ] = '' !== $key ? $key : $old[ $field ];
+		}
+
+		$out['model']            = ! empty( $input['model'] ) ? sanitize_text_field( $input['model'] ) : $out['model'];
+		$out['gemini_model']     = ! empty( $input['gemini_model'] ) ? sanitize_text_field( $input['gemini_model'] ) : $out['gemini_model'];
 		$out['page_ids']         = isset( $input['page_ids'] ) ? array_map( 'absint', (array) $input['page_ids'] ) : array();
 		$out['include_products'] = empty( $input['include_products'] ) ? 0 : 1;
 		$out['product_limit']    = isset( $input['product_limit'] ) ? max( 0, min( 1000, absint( $input['product_limit'] ) ) ) : 200;
@@ -115,17 +124,29 @@ final class AI_Store_Chat {
 				<?php settings_fields( 'aisc_group' ); ?>
 				<table class="form-table" role="presentation">
 					<tr>
-						<th scope="row"><label for="aisc_api_key">Claude API key</label></th>
+						<th scope="row">AI provider</th>
 						<td>
-							<input type="password" id="aisc_api_key" name="<?php echo esc_attr( $name ); ?>[api_key]" value="" class="regular-text" autocomplete="off" placeholder="<?php echo $s['api_key'] ? esc_attr( 'Saved — leave empty to keep' ) : 'sk-ant-...'; ?>">
-							<p class="description">Stored on your server only. It is never sent to the browser.</p>
+							<fieldset>
+								<label style="display:block;margin-bottom:4px"><input type="radio" name="<?php echo esc_attr( $name ); ?>[provider]" value="claude" <?php checked( $s['provider'], 'claude' ); ?>> Claude (Anthropic) — paid, pre-paid credits</label>
+								<label style="display:block"><input type="radio" name="<?php echo esc_attr( $name ); ?>[provider]" value="gemini" <?php checked( $s['provider'], 'gemini' ); ?>> Gemini (Google) — has a free tier for testing</label>
+							</fieldset>
+							<p class="description"><strong>Gemini free tier:</strong> Google may use free-tier prompts and replies to improve its products, and people may review them. Fine for testing; for a live store with real customer messages, turn on billing for your Gemini key. Stores serving the EU, UK or Switzerland must use the paid tier.</p>
 						</td>
 					</tr>
 					<tr>
-						<th scope="row"><label for="aisc_model">Model</label></th>
+						<th scope="row"><label for="aisc_api_key">Claude API key</label></th>
 						<td>
-							<input type="text" id="aisc_model" name="<?php echo esc_attr( $name ); ?>[model]" value="<?php echo esc_attr( $s['model'] ); ?>" class="regular-text">
-							<p class="description">Default <code>claude-haiku-5-5</code> is the lowest-cost model.</p>
+							<input type="password" id="aisc_api_key" name="<?php echo esc_attr( $name ); ?>[api_key]" value="" class="regular-text" autocomplete="off" placeholder="<?php echo $s['api_key'] ? esc_attr( 'Saved — leave empty to keep' ) : 'sk-ant-...'; ?>">
+							<p class="description">From <a href="https://platform.claude.com" target="_blank" rel="noopener">platform.claude.com</a>. Stored on your server only; never sent to the browser.</p>
+							<p><label>Model: <input type="text" name="<?php echo esc_attr( $name ); ?>[model]" value="<?php echo esc_attr( $s['model'] ); ?>" class="regular-text"></label></p>
+						</td>
+					</tr>
+					<tr>
+						<th scope="row"><label for="aisc_gemini_key">Gemini API key</label></th>
+						<td>
+							<input type="password" id="aisc_gemini_key" name="<?php echo esc_attr( $name ); ?>[gemini_api_key]" value="" class="regular-text" autocomplete="off" placeholder="<?php echo $s['gemini_api_key'] ? esc_attr( 'Saved — leave empty to keep' ) : 'AIza...'; ?>">
+							<p class="description">From <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>. Stored on your server only; never sent to the browser.</p>
+							<p><label>Model: <input type="text" name="<?php echo esc_attr( $name ); ?>[gemini_model]" value="<?php echo esc_attr( $s['gemini_model'] ); ?>" class="regular-text"></label></p>
 						</td>
 					</tr>
 					<tr>
@@ -192,14 +213,19 @@ final class AI_Store_Chat {
 	 * Front end
 	 * ------------------------------------------------------------------ */
 
+	/** The API key for the provider currently selected, or '' if none is saved. */
+	private static function active_key( $s ) {
+		return 'gemini' === $s['provider'] ? $s['gemini_api_key'] : $s['api_key'];
+	}
+
 	public static function enqueue_assets() {
 		$s = self::settings();
-		if ( empty( $s['api_key'] ) || is_admin() ) {
+		if ( '' === self::active_key( $s ) || is_admin() ) {
 			return;
 		}
 		$base = plugin_dir_url( __FILE__ );
-		wp_enqueue_style( 'aisc-chat', $base . 'assets/chat.css', array(), '1.0.0' );
-		wp_enqueue_script( 'aisc-chat', $base . 'assets/chat.js', array(), '1.0.0', true );
+		wp_enqueue_style( 'aisc-chat', $base . 'assets/chat.css', array(), '1.1.0' );
+		wp_enqueue_script( 'aisc-chat', $base . 'assets/chat.js', array(), '1.1.0', true );
 		wp_localize_script(
 			'aisc-chat',
 			'AISC',
@@ -237,7 +263,7 @@ final class AI_Store_Chat {
 	public static function handle_message( WP_REST_Request $request ) {
 		$s = self::settings();
 
-		if ( empty( $s['api_key'] ) ) {
+		if ( '' === self::active_key( $s ) ) {
 			return new WP_REST_Response( array( 'error' => 'Chat is not configured yet.' ), 503 );
 		}
 
@@ -254,13 +280,38 @@ final class AI_Store_Chat {
 		$messages   = self::clean_history( $request->get_param( 'history' ) );
 		$messages[] = array( 'role' => 'user', 'content' => $message );
 
+		$fallback = 'Sorry, I could not answer right now.' . ( $s['support_email'] ? ' Please email ' . $s['support_email'] . '.' : '' );
+
+		$result = 'gemini' === $s['provider']
+			? self::ask_gemini( $s, self::system_prompt( $s ), $messages )
+			: self::ask_claude( $s, self::system_prompt( $s ), $messages );
+
+		if ( is_wp_error( $result ) ) {
+			self::record_stats( 0, 0, true );
+			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+				error_log( 'AI Store Chat: ' . $result->get_error_message() ); // phpcs:ignore
+			}
+			return new WP_REST_Response( array( 'error' => $fallback ), 502 );
+		}
+
+		self::record_stats( $result['in'], $result['out'], false );
+
+		return new WP_REST_Response( array( 'reply' => $result['reply'] ), 200 );
+	}
+
+	/* ---------------------------------------------------------------------
+	 * Providers. Each returns array( reply, in, out ) or a WP_Error.
+	 * $messages = alternating array( role => user|assistant, content => text ).
+	 * ------------------------------------------------------------------ */
+
+	private static function ask_claude( $s, $system, $messages ) {
 		$body = array(
 			'model'      => $s['model'],
 			'max_tokens' => 400,
 			'system'     => array(
 				array(
 					'type'          => 'text',
-					'text'          => self::system_prompt( $s ),
+					'text'          => $system,
 					// The store info rarely changes, so let the API cache it between messages.
 					'cache_control' => array( 'type' => 'ephemeral' ),
 				),
@@ -268,35 +319,19 @@ final class AI_Store_Chat {
 			'messages'   => $messages,
 		);
 
-		$response = wp_remote_post(
+		$data = self::post_json(
 			self::API_URL,
 			array(
-				'timeout' => 30,
-				'headers' => array(
-					'x-api-key'         => $s['api_key'],
-					'anthropic-version' => self::API_VERSION,
-					'content-type'      => 'application/json',
-				),
-				'body'    => wp_json_encode( $body ),
-			)
+				'x-api-key'         => $s['api_key'],
+				'anthropic-version' => self::API_VERSION,
+			),
+			$body
 		);
-
-		$fallback = 'Sorry, I could not answer right now.' . ( $s['support_email'] ? ' Please email ' . $s['support_email'] . '.' : '' );
-
-		if ( is_wp_error( $response ) ) {
-			self::record_stats( 0, 0, true );
-			return new WP_REST_Response( array( 'error' => $fallback ), 502 );
+		if ( is_wp_error( $data ) ) {
+			return $data;
 		}
-
-		$code = wp_remote_retrieve_response_code( $response );
-		$data = json_decode( wp_remote_retrieve_body( $response ), true );
-
-		if ( 200 !== $code || empty( $data['content'] ) ) {
-			self::record_stats( 0, 0, true );
-			if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-				error_log( 'AI Store Chat API error ' . $code . ': ' . wp_remote_retrieve_body( $response ) ); // phpcs:ignore
-			}
-			return new WP_REST_Response( array( 'error' => $fallback ), 502 );
+		if ( empty( $data['content'] ) ) {
+			return new WP_Error( 'aisc_empty', 'Claude returned no content.' );
 		}
 
 		$reply = '';
@@ -307,10 +342,81 @@ final class AI_Store_Chat {
 		}
 
 		$usage = isset( $data['usage'] ) ? $data['usage'] : array();
-		$in    = (int) ( $usage['input_tokens'] ?? 0 ) + (int) ( $usage['cache_read_input_tokens'] ?? 0 ) + (int) ( $usage['cache_creation_input_tokens'] ?? 0 );
-		self::record_stats( $in, (int) ( $usage['output_tokens'] ?? 0 ), false );
+		return array(
+			'reply' => trim( $reply ),
+			'in'    => (int) ( $usage['input_tokens'] ?? 0 ) + (int) ( $usage['cache_read_input_tokens'] ?? 0 ) + (int) ( $usage['cache_creation_input_tokens'] ?? 0 ),
+			'out'   => (int) ( $usage['output_tokens'] ?? 0 ),
+		);
+	}
 
-		return new WP_REST_Response( array( 'reply' => trim( $reply ) ), 200 );
+	private static function ask_gemini( $s, $system, $messages ) {
+		$contents = array();
+		foreach ( $messages as $m ) {
+			$contents[] = array(
+				// Gemini calls the assistant role "model".
+				'role'  => 'assistant' === $m['role'] ? 'model' : 'user',
+				'parts' => array( array( 'text' => $m['content'] ) ),
+			);
+		}
+
+		$body = array(
+			'system_instruction' => array( 'parts' => array( array( 'text' => $system ) ) ),
+			'contents'           => $contents,
+			// Some Gemini models "think" first and that counts toward this limit, so leave room.
+			'generationConfig'   => array( 'maxOutputTokens' => 1024 ),
+		);
+
+		$model = preg_replace( '/[^a-zA-Z0-9._-]/', '', $s['gemini_model'] );
+		$data  = self::post_json(
+			sprintf( self::GEMINI_URL, rawurlencode( $model ) ),
+			array( 'x-goog-api-key' => $s['gemini_api_key'] ),
+			$body
+		);
+		if ( is_wp_error( $data ) ) {
+			return $data;
+		}
+
+		$reply = '';
+		$parts = $data['candidates'][0]['content']['parts'] ?? array();
+		foreach ( (array) $parts as $part ) {
+			// Skip internal "thought" parts; keep only the answer text.
+			if ( isset( $part['text'] ) && empty( $part['thought'] ) ) {
+				$reply .= $part['text'];
+			}
+		}
+		if ( '' === trim( $reply ) ) {
+			$why = $data['promptFeedback']['blockReason'] ?? ( $data['candidates'][0]['finishReason'] ?? 'unknown' );
+			return new WP_Error( 'aisc_empty', 'Gemini returned no text (' . $why . ').' );
+		}
+
+		$usage = isset( $data['usageMetadata'] ) ? $data['usageMetadata'] : array();
+		return array(
+			'reply' => trim( $reply ),
+			'in'    => (int) ( $usage['promptTokenCount'] ?? 0 ),
+			'out'   => (int) ( $usage['candidatesTokenCount'] ?? 0 ) + (int) ( $usage['thoughtsTokenCount'] ?? 0 ),
+		);
+	}
+
+	/** POST JSON and return the decoded body, or a WP_Error (network error or non-200). */
+	private static function post_json( $url, $headers, $body ) {
+		$response = wp_remote_post(
+			$url,
+			array(
+				'timeout' => 30,
+				'headers' => array_merge( $headers, array( 'content-type' => 'application/json' ) ),
+				'body'    => wp_json_encode( $body ),
+			)
+		);
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+		$code = (int) wp_remote_retrieve_response_code( $response );
+		$raw  = wp_remote_retrieve_body( $response );
+		if ( 200 !== $code ) {
+			return new WP_Error( 'aisc_http', 'API error ' . $code . ': ' . mb_substr( $raw, 0, 500 ) );
+		}
+		$data = json_decode( $raw, true );
+		return is_array( $data ) ? $data : new WP_Error( 'aisc_json', 'Could not read the API response.' );
 	}
 
 	/** Accept only well-formed, alternating user/assistant turns from the browser. */
